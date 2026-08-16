@@ -1,0 +1,312 @@
+# ===========================================================================
+# Стек мониторинга на базе Графини
+# Версия: 1.0 (на основе документации "Лаборатории Числитель")
+# ===========================================================================
+name: grafinya-monitoring-stack
+
+services:
+
+  # =========================================================================
+  # Nginx Reverse Proxy (главная точка входа)
+  # =========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: grafinya-nginx
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:3004:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - grafinya-frontend
+      - grafinya-backend
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+      
+  # ---------------------------------------------------------------------------
+  # MongoDB для Графини (база данных)
+  # ---------------------------------------------------------------------------
+  grafinya-mongo:
+    image: registry.pult.chislitellab.ru:8124/portal/database-app:2026H1
+    container_name: grafinya-mongo
+    env_file: .env_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - grafinya_mongo-data:/data/db
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Tarantool (кэш)
+  # ---------------------------------------------------------------------------
+  grafinya-tarantool:
+    image: tarantool/tarantool:2.11
+    container_name: grafinya-tarantool
+    restart: unless-stopped
+    expose:
+      - "3301"
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # Backend Графини
+  # ---------------------------------------------------------------------------
+  grafinya-backend:
+    image: registry.pult.chislitellab.ru:8124/portal/backend-app:2026H1
+    container_name: grafinya-backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "const url = new URL(process.env.HEALTHCHECK_URL || 'http://127.0.0.1:5000/healthz'); const client = url.protocol === 'https:' ? require('https') : require('http'); const req = client.get(url, (res) => process.exit(res.statusCode === 200 ? 0 : 1)); req.on('error', () => process.exit(1)); req.setTimeout(4000, () => { req.destroy(); process.exit(1); });"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    ports:
+      - "5000:5000"
+    env_file: .env_backend
+    environment:
+      SECURITY_LOG_FILE_PATH: ${SECURITY_LOG_FILE_PATH:-/app-data/security/security.log}
+    volumes:
+      - grafinya_security-log-data:/app-data/security
+    depends_on:
+      - grafinya-mongo
+      - grafinya-tarantool
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # Cache Worker (кеширование)
+  # ---------------------------------------------------------------------------
+  grafinya-cache-worker:
+    image: registry.pult.chislitellab.ru:8124/portal/backend-app:2026H1
+    container_name: grafinya-cache-worker
+    restart: unless-stopped
+    env_file: .env_backend
+    command: npm run worker:cache
+    healthcheck:
+      test: ["CMD-SHELL", "ps | grep -Eq '[c]acheWorker\\.(ts|js)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      - grafinya-mongo
+      - grafinya-tarantool
+      - grafinya-backend
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # Frontend Графини (веб-интерфейс)
+  # ---------------------------------------------------------------------------
+  grafinya-frontend:
+    image: registry.pult.chislitellab.ru:8124/portal/frontend-app:2026H1
+    container_name: grafinya-frontend
+    restart: unless-stopped
+    env_file: .env_frontend
+    depends_on:
+      - grafinya-backend
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # Prometheus Plugin (опционально, для интеграции)
+  # ---------------------------------------------------------------------------
+  grafinya-prometheus-plugin:
+    image: registry.pult.chislitellab.ru:8124/portal/plugins/prometheus:1.3.0
+    container_name: grafinya-prometheus-plugin
+    restart: unless-stopped
+    ports:
+      - "18080:8080"
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # =========================================================================
+  # VictoriaMetrics (Хранение метрик - PromQL-совместимый open source)
+  # =========================================================================
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoriametrics
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8428:8428"
+    volumes:
+      - victoriametrics-data:/victoria-metrics-data
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--storageDataPath=/victoria-metrics-data'
+      - '--retentionPeriod=7d'
+      - '--httpListenAddr=:8428'
+      - '--promscrape.config=/etc/prometheus/prometheus.yml'
+      - '--promscrape.config.strictParse=false'
+      - '--promscrape.maxScrapeSize=33554432'
+      - '--maxLabelsPerTimeseries=100'
+    networks:
+      - 1c-infrastructure
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # =========================================================================
+  # vmagent (Сбор метрик с хостов для VictoriaMetrics)
+  # =========================================================================
+  vmagent:
+    image: victoriametrics/vmagent:latest
+    container_name: vmagent
+    restart: unless-stopped
+    ports:
+      - "8429:8429"
+    volumes:
+      - ./promscrape.yml:/config/promscrape.yml:ro
+    command:
+      - '--remoteWrite.url=http://victoriametrics:8428/api/v1/write'
+      - '--promscrape.config=/config/promscrape.yml'
+      - '--remoteWrite.retryMinInterval=10s'
+      - '--remoteWrite.retryMaxInterval=30s'
+      - '--httpListenAddr=:8429'
+    networks:
+      - 1c-infrastructure
+    depends_on:
+      - victoriametrics
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # =========================================================================
+  # vmalert (Алерты - open source замена Grafana Alerting)
+  # =========================================================================
+  vmalert:
+    image: victoriametrics/vmalert:latest
+    container_name: vmalert
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8880:8880"
+    volumes:
+      - ./monitoring/vm-alerts.yml:/etc/alerts/vm-alerts.yml:ro
+    command:
+      - '--datasource.url=http://victoriametrics:8428'
+#      - '--notifier.url=http://alertmanager:9093'  # ← Отправляем в Alertmanager!
+      - '--notifier.url=http://webhook-proxy:80'
+      - '--rule=/etc/alerts/*.yml'
+      - '--httpListenAddr=:8880'
+      - '--remoteWrite.url=http://victoriametrics:8428'
+    networks:
+      - 1c-infrastructure
+    depends_on:
+      - victoriametrics
+#      - alertmanager
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # =========================================================================
+  # Webhook Proxy (vmalert → VoceChat)
+  # Принимает JSON от vmalert, форматирует в текст, добавляет x-api-key
+  # =========================================================================
+  webhook-proxy:
+    image: python:3-alpine
+    container_name: webhook-proxy
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:9093:80"
+    volumes:
+      - ./monitoring/webhook-forwarder.py:/app/forwarder.py:ro
+    command: python /app/forwarder.py
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'    # Максимум 10% одного ядра
+          memory: 64M    # Максимум 64 MB RAM
+        reservations:
+          cpus: '0.05'   # Гарантировано 5%
+          memory: 32M
+    environment:
+      - PYTHONUNBUFFERED=1 
+      - VOCECHAT_API_KEY=${VOCECHAT_API_KEY}
+      - VOCECHAT_CHANNEL_ID=${VOCECHAT_CHANNEL_ID:-4}
+      - TZ=Europe/Moscow
+    networks:
+      - 1c-infrastructure
+
+networks:
+  1c-infrastructure:
+    external: true
+    name: 1c_infrastructure_1c-infrastructure
+
+volumes:
+  grafinya_mongo-data:
+  grafinya_security-log-data:
+  victoriametrics-data:

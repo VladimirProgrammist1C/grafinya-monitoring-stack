@@ -1,0 +1,153 @@
+﻿# =============================================================================
+# Конфигурация сбора метрик для VictoriaMetrics
+# (файл называется prometheus.yml по историческим причинам — VictoriaMetrics
+#  использует PromQL-совместимый формат конфигурации)
+# Version: 3.0 (Cleaned for public release)
+# Last updated: 17.08.2026
+# =============================================================================
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    monitor: 'grafinya-monitoring-stack'
+    environment: 'production'
+
+# =============================================================================
+# Конфигурация сбора метрик (scrape configs)
+# =============================================================================
+# Примечание: некоторые targets (cadvisor, postgres-exporter, grafana и др.)
+# находятся в основном стеке мониторинга (1c-home-infrastructure) и доступны
+# через общую сеть 1c-infrastructure.
+# =============================================================================
+
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Сама VictoriaMetrics (мониторинг самой себя)
+  # ---------------------------------------------------------------------------
+  - job_name: 'victoriametrics'
+    static_configs:
+      - targets: ['victoriametrics:8428']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'vm_.*|up|process_.*'
+        action: keep
+
+  # ---------------------------------------------------------------------------
+  # 2. cAdvisor (CPU/Memory контейнеров) — из основного стека
+  # ---------------------------------------------------------------------------
+  - job_name: 'cadvisor'
+    scrape_interval: 60s
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '(container_cpu_usage_seconds_total|container_memory_usage_bytes|container_last_seen|container_network_receive_bytes_total|container_network_transmit_bytes_total|machine_memory_bytes|container_fs_usage_bytes|container_fs_limit_bytes|up)'
+        action: keep
+
+  # ---------------------------------------------------------------------------
+  # 3. postgres-exporter (метрики PostgreSQL) — из основного стека
+  # ---------------------------------------------------------------------------
+  - job_name: 'postgres-exporter'
+    relabel_configs:
+      - target_label: service
+        replacement: 'postgres-exporter'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'pg_up|pg_stat_database_.*|pg_database_size_bytes|pg_stat_activity_count|pg_locks_count|pg_stat_activity_backend_start'
+        action: keep
+
+  # ---------------------------------------------------------------------------
+  # 4. Blackbox Exporter (HTTP проверки доступности сервисов) — из основного стека
+  # ---------------------------------------------------------------------------
+  - job_name: 'blackbox-http'
+    metrics_path: /probe
+    params:
+      module: [http_2xx_or_redirect]
+    static_configs:
+      - targets:
+          - http://pgadmin4:80
+          - http://portainer:9000
+          - http://grafana:3000/api/health
+          - http://vocechat-notifications:3000
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: (.*)
+        target_label: __param_target
+        replacement: ${1}
+      - source_labels: [__param_target]
+        regex: (.*)
+        target_label: instance
+        replacement: ${1}
+      - source_labels: [__param_target]
+        regex: (.*)
+        target_label: __address__
+        replacement: blackbox-exporter:9115
+      - source_labels: [__param_target]
+        regex: 'http://([^/:]+).*'
+        target_label: service
+        replacement: '${1}'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'probe_success|probe_duration_seconds|probe_http_status_code'
+        action: keep
+
+  # ---------------------------------------------------------------------------
+  # 5. Grafana (метрики самой Grafana) — из основного стека
+  # ---------------------------------------------------------------------------
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['grafana:3000']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'grafana_.*|up|process_.*'
+        action: keep
+
+  # ---------------------------------------------------------------------------
+  # 6. Portainer (метрики через Blackbox) — из основного стека
+  # ---------------------------------------------------------------------------
+  - job_name: 'portainer-metrics'
+    metrics_path: /probe
+    params:
+      module: [http_2xx_or_redirect]
+    static_configs:
+      - targets:
+          - http://portainer:9000/api/status
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: (.*)
+        target_label: __param_target
+        replacement: ${1}
+      - source_labels: [__param_target]
+        regex: (.*)
+        target_label: instance
+        replacement: ${1}
+      - source_labels: [__param_target]
+        regex: (.*)
+        target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # ---------------------------------------------------------------------------
+  # 7. vmalert (метрики алертов) — из этого стека
+  # ---------------------------------------------------------------------------
+  - job_name: vmalert
+    metric_relabel_configs:
+      - action: keep
+        source_labels: [__name__]
+        regex:
+          - vmalert_alerts_firing
+          - vmalert_alerts_pending
+          - vmalert_alerts_fired_total
+          - vmalert_alerts_sent_total
+          - vmalert_alerts_send_errors_total
+          - vmalert_iteration_total
+          - vmalert_execution_total
+          - vmalert_execution_errors_total
+          - up
+          - process_.*
+    static_configs:
+      - targets:
+          - vmalert:8880

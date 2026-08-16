@@ -1,0 +1,206 @@
+# =============================================================================
+# vmalert Rules для Grafinya Monitoring Stack
+# Полный набор для мониторинга инфраструктуры
+# Версия: 4.0 (cleaned for public release)
+# =============================================================================
+
+groups:
+  # -------------------------------------------------------------------------
+  # Группа 1: Критические сервисы инфраструктуры (HTTP/Blackbox)
+  # -------------------------------------------------------------------------
+  - name: infrastructure-critical
+    interval: 30s
+    rules:
+      # 🔴 Grafana (западный стек — мониторим параллельный контур)
+      - alert: GrafanaDown
+        expr: probe_success{job="blackbox-http", instance="http://grafana:3000/api/health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "grafana"
+        annotations:
+          summary: "🔴 Grafana недоступна"
+          description: "Веб-интерфейс мониторинга (западный стек) не отвечает. Проверьте контейнер `grafana`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🔴 pgAdmin4
+      - alert: PgAdminDown
+        expr: probe_success{job="blackbox-http", instance="http://pgadmin4:80"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "pgadmin4"
+        annotations:
+          summary: "🔴 pgAdmin4 недоступен"
+          description: "Веб-интерфейс управления PostgreSQL не отвечает. Проверьте контейнер `pgadmin4`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🔴 Portainer
+      - alert: PortainerDown
+        expr: probe_success{job="blackbox-http", instance="http://portainer:9000"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "portainer"
+        annotations:
+          summary: "🔴 Portainer недоступен"
+          description: "Веб-интерфейс управления контейнерами не отвечает. Проверьте контейнер `portainer`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🔴 VoceChat
+      - alert: VoceChatDown
+        expr: probe_success{job="blackbox-http", instance="http://vocechat-notifications:3000"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "vocechat"
+        annotations:
+          summary: "🔴 VoceChat (мессенджер) недоступен"
+          description: "Локальный мессенджер для уведомлений не отвечает. Вы не получите ни HR-уведомления, ни технические алерты. Проверьте контейнер `vocechat-notifications`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+  # -------------------------------------------------------------------------
+  # Группа 2: Служебные компоненты мониторинга (UP-метрики)
+  # -------------------------------------------------------------------------
+  - name: monitoring-components
+    interval: 30s
+    rules:
+      # 🔴 Postgres-exporter
+      - alert: PostgresExporterDown
+        expr: up{job="postgres-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "postgres-exporter"
+        annotations:
+          summary: "🔴 Postgres-exporter недоступен"
+          description: "Сбор метрик с PostgreSQL остановлен. Алерты по размеру базы и подключениям не будут срабатывать. Проверьте контейнер `postgres-exporter`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🔴 VictoriaMetrics
+      - alert: VictoriaMetricsDown
+        expr: up{job="victoriametrics"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "victoriametrics"
+        annotations:
+          summary: "🔴 VictoriaMetrics недоступна"
+          description: "VictoriaMetrics (хранилище метрик) не отвечает. Это критично — мониторинг и алерты не работают. Проверьте контейнер `victoriametrics`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🔴 cAdvisor
+      - alert: CadvisorDown
+        expr: up{job="cadvisor"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "cadvisor"
+        annotations:
+          summary: "🔴 cAdvisor недоступен"
+          description: "Сбор метрик с контейнеров остановлен. Алерты по CPU и RAM не будут срабатывать. Проверьте контейнер `cadvisor`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🔴 Blackbox-exporter (сам экспортёр)
+      - alert: BlackboxExporterDown
+        expr: up{job="blackbox-http"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: vmalert
+          service: "blackbox"
+        annotations:
+          summary: "🔴 Blackbox Exporter недоступен"
+          description: "Сбор метрик HTTP-проверок остановлен. Ни один из алертов доступности не будет работать. Проверьте контейнер `blackbox-exporter`."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+  # -------------------------------------------------------------------------
+  # Группа 3: Ресурсы контейнеров (cAdvisor)
+  # -------------------------------------------------------------------------
+  - name: container-resources
+    interval: 30s
+    rules:
+      # 🟡 Высокий CPU
+      - alert: HighContainerCPU
+        expr: sum(rate(container_cpu_usage_seconds_total{name!=""}[5m])) by (name) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          source: vmalert
+        annotations:
+          summary: "⚠️ Высокая загрузка CPU контейнером {{ $labels.name }}"
+          description: "Контейнер {{ $labels.name }} использует {{ $value }}% CPU более 5 минут."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🟡 Высокое потребление RAM
+      - alert: HighContainerMemory
+        expr: container_memory_usage_bytes{name!=""} > 2147483648
+        for: 5m
+        labels:
+          severity: warning
+          source: vmalert
+        annotations:
+          summary: "⚠️ Высокое потребление RAM контейнером {{ $labels.name }}"
+          description: "Контейнер {{ $labels.name }} использует более 2 GB RAM."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+  # -------------------------------------------------------------------------
+  # Группа 4: Бизнес-метрики PostgreSQL (Postgres-exporter)
+  # -------------------------------------------------------------------------
+  - name: business-metrics
+    interval: 30s
+    rules:
+      # 🟡 Размер базы данных
+      - alert: HighDatabaseSize
+        expr: pg_database_size_bytes > 5368709120
+        for: 10m
+        labels:
+          severity: warning
+          source: vmalert
+          service: "database"
+        annotations:
+          summary: "📊 Большой размер базы данных"
+          description: "База данных превысила 5 ГБ (текущий: {{ $value | humanize1024 }}B). Проверьте, нет ли неиспользуемых данных, и проведите регламентные операции."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+      # 🟡 Количество подключений к базе
+      - alert: HighDatabaseConnections
+        expr: sum(pg_stat_activity_count) > 10
+        for: 5m
+        labels:
+          severity: warning
+          source: vmalert
+          service: "database"
+        annotations:
+          summary: "🔌 Много подключений к базе данных"
+          description: "Количество активных подключений к PostgreSQL превышает 10 (текущее: {{ $value }}). Проверьте в pgAdmin список сессий — возможно, есть «зависшие»."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
+
+  # -------------------------------------------------------------------------
+  # Группа 5: Ресурсы хоста (Windows Exporter — опционально)
+  # -------------------------------------------------------------------------
+  # См. README.md секцию "Windows-specific метрики"
+  - name: host-resources
+    interval: 30s
+    rules:
+      # 🟡 Размер папки Temp
+      - alert: TempFolderSizeHigh
+        expr: temp_folder_size_bytes{path="Temp"} / 1024 / 1024 / 1024 > 40
+        for: 2m
+        labels:
+          severity: warning
+          source: vmalert
+          service: "host"
+          threshold: "40"
+          unit: "ГБ"
+        annotations:
+          summary: "⚠️ Размер папки Temp превысил 40 ГБ"
+          description: "Временная папка на хосте достигла {{ $value | printf \"%.2f\" }} ГБ, что превышает порог 40 ГБ. Рекомендуется очистить временную папку пользователя (%TEMP%)."
+          dashboard: "http://localhost:3002/d/1c-infrastructure-overview"
